@@ -366,7 +366,13 @@ enum AVPacketSideDataType {
      * Extensible image file format metadata. The payload is a buffer containing
      * EXIF metadata, starting with either 49 49 2a 00, or 4d 4d 00 2a.
      */
-     AV_PKT_DATA_EXIF,
+    AV_PKT_DATA_EXIF,
+
+    /**
+     * IAMF Descriptors parameter associated with the audio frame. This metadata
+     * is in the form of the IAMFContext struct, only used when rewrap MP4 -> IAMF.
+     */
+    AV_PKT_DATA_IAMF_DESCRIPTORS,
 
     /**
      * The number of side data types.
