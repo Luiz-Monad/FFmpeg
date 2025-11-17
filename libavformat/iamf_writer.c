@@ -105,8 +105,8 @@ static int populate_audio_roll_distance(IAMFCodecConfig *codec_config)
     return 0;
 }
 
-static int fill_codec_config(IAMFContext *iamf, const AVStreamGroup *stg,
-                             IAMFCodecConfig *codec_config)
+int ff_iamf_fill_codec_config(IAMFContext *iamf, const AVStreamGroup *stg,
+                              IAMFCodecConfig *codec_config)
 {
     const AVStream *st = stg->streams[0];
     IAMFCodecConfig **tmp;
@@ -309,7 +309,7 @@ int ff_iamf_add_audio_element(IAMFContext *iamf, const AVStreamGroup *stg, void 
     if (!codec_config)
         return AVERROR(ENOMEM);
 
-    ret = fill_codec_config(iamf, stg, codec_config);
+    ret = ff_iamf_fill_codec_config(iamf, stg, codec_config);
     if (ret < 0) {
         av_free(codec_config);
         return ret;

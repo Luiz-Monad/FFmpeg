@@ -532,6 +532,9 @@ static void dump_sidedata(void *ctx, const AVPacketSideData *side_data, int nb_s
         case AV_PKT_DATA_3D_REFERENCE_DISPLAYS:
             dump_tdrdi(ctx, sd, log_level);
             break;
+        case AV_PKT_DATA_IAMF_DESCRIPTORS:
+            av_log(ctx, log_level, "IAMF descriptors");
+            break;
         default:
             if (name)
                 av_log(ctx, log_level, "(%zu bytes)", sd->size);

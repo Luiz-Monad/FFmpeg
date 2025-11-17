@@ -32,6 +32,9 @@
 int ff_iamf_add_audio_element(IAMFContext *iamf, const AVStreamGroup *stg, void *log_ctx);
 int ff_iamf_add_mix_presentation(IAMFContext *iamf, const AVStreamGroup *stg, void *log_ctx);
 
+int ff_iamf_fill_codec_config(IAMFContext *iamf, const AVStreamGroup *stg,
+                              IAMFCodecConfig *codec_config);
+
 int ff_iamf_write_descriptors(const IAMFContext *iamf, AVIOContext *pb, void *log_ctx);
 
 int ff_iamf_write_parameter_blocks(const IAMFContext *iamf, AVIOContext *pb,

@@ -980,6 +980,17 @@ static int mov_read_iacb(MOVContext *c, AVIOContext *pb, MOVAtom atom)
                 if (audio_element->layers[0].substream_count != 1)
                     disposition &= ~AV_DISPOSITION_DEFAULT;
                 stream = st;
+
+                // save a copy of the descriptors on the side data for later use when encoding raw IAMF
+                if (!av_packet_side_data_new(&substream->codecpar->coded_side_data,
+                                             &substream->codecpar->nb_coded_side_data,
+                                             AV_PKT_DATA_IAMF_DESCRIPTORS,
+                                             descriptors_size, 0)) {
+                    ret = AVERROR(ENOMEM);
+                    goto fail;
+                }
+                memcpy(substream->codecpar->coded_side_data->data,
+                       st->codecpar->extradata, descriptors_size);
             } else
                 stream = avformat_new_stream(c->fc, NULL);
             if (!stream) {

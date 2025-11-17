@@ -21,8 +21,12 @@
 
 #include <stdint.h>
 
+#include "libavutil/intreadwrite.h"
+#include "libavutil/mem.h"
 #include "avformat.h"
+#include "avio_internal.h"
 #include "iamf.h"
+#include "iamf_parse.h"
 #include "iamf_writer.h"
 #include "internal.h"
 #include "mux.h"
@@ -40,6 +44,7 @@ static int iamf_init(AVFormatContext *s)
 {
     IAMFMuxContext *const c = s->priv_data;
     IAMFContext *const iamf = &c->iamf;
+    FFIOContext b;
     int nb_audio_elements = 0, nb_mix_presentations = 0;
     int ret;
 
@@ -68,8 +73,64 @@ static int iamf_init(AVFormatContext *s)
     }
 
     if (s->nb_stream_groups <= 1) {
-        av_log(s, AV_LOG_ERROR, "There must be at least two stream groups\n");
-        return AVERROR(EINVAL);
+        av_log(s, AV_LOG_WARNING,
+               "Less than two stream groups provided; falling back to copying IAMF descriptors.\n");
+
+        /* Find the descriptors, by default only stored on the first stream */
+        const AVPacketSideData *sd = 
+            av_packet_side_data_get(s->streams[0]->codecpar->coded_side_data,
+                                    s->streams[0]->codecpar->nb_coded_side_data,
+                                    AV_PKT_DATA_IAMF_DESCRIPTORS);
+        if (!sd) {
+            av_log(s, AV_LOG_ERROR,
+                "No IAMF extradata found on the first input stream; cannot rewrap.\n");
+            return AVERROR_INVALIDDATA;
+        }
+
+        av_log(s, AV_LOG_TRACE,
+            "Writing IAMF descriptors from extradata (size=%d)\n", sd->size);
+        
+        ffio_init_read_context(&b, sd->data, sd->size);
+        ret = ff_iamfdec_read_descriptors(iamf, &b.pub, sd->size, s);
+        if (ret < 0)
+            return ret;
+        
+        /* patch the iamf codec struct like the ff_iamf_add_audio_element does */
+
+        for (int i = 0; i < iamf->nb_codec_configs; i++) {
+            av_free(iamf->codec_configs[i]->extradata);
+            av_free(iamf->codec_configs[i]);
+        }
+        av_freep(&iamf->codec_configs);
+        iamf->nb_codec_configs = 0;
+
+        for (int i = 0; i < iamf->nb_audio_elements; i++) {
+            IAMFAudioElement *audio_element = iamf->audio_elements[i];
+
+            /* Create a synthetic stream group */
+            AVStreamGroup *stg = avformat_stream_group_create(
+                    s, AV_STREAM_GROUP_PARAMS_IAMF_AUDIO_ELEMENT, NULL);
+            if (!stg)
+                return AVERROR(ENOMEM);
+
+            int sid = audio_element->substreams[0].audio_substream_id;
+            for (int j = 0; j < s->nb_streams; j++) {
+                AVStream *st = s->streams[j];
+                if (st->id != sid) continue;
+                avformat_stream_group_add_stream(stg, st);
+                break;
+            }
+
+            IAMFCodecConfig *cc = av_mallocz(sizeof(*cc));
+            if (!cc)
+                return AVERROR(ENOMEM);
+
+            ret = ff_iamf_fill_codec_config(iamf, stg, cc);
+            if (ret < 0)
+                return ret;
+        }
+
+        return 0;
     }
 
     for (int i = 0; i < s->nb_stream_groups; i++) {
