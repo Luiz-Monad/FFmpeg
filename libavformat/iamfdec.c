@@ -21,12 +21,14 @@
 
 #include "libavutil/avassert.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/mem.h"
 #include "avformat.h"
 #include "demux.h"
 #include "iamf.h"
 #include "iamf_reader.h"
 #include "iamf_parse.h"
 #include "internal.h"
+#include "avio_internal.h"
 
 //return < 0 if we need more data
 static int get_score(const uint8_t *buf, int buf_size, enum IAMF_OBU_Type type, int *seq)
@@ -75,9 +77,14 @@ static int iamf_read_header(AVFormatContext *s)
     IAMFContext *const iamf = &c->iamf;
     int ret;
 
+    int64_t old_offset = avio_tell(s->pb);
+
     ret = ff_iamfdec_read_descriptors(iamf, s->pb, INT_MAX, s);
     if (ret < 0)
         return ret;
+
+    int64_t cur_offset = avio_tell(s->pb);
+    size_t descriptors_size = cur_offset - old_offset;
 
     for (int i = 0; i < iamf->nb_audio_elements; i++) {
         IAMFAudioElement *audio_element = iamf->audio_elements[i];
@@ -113,6 +120,22 @@ static int iamf_read_header(AVFormatContext *s)
                 st->disposition |= AV_DISPOSITION_DEPENDENT;
             st->id = substream->audio_substream_id;
             avpriv_set_pts_info(st, 64, 1, st->codecpar->sample_rate);
+       
+            // save a copy of the descriptors on the side data for later use when encoding raw IAMF
+            if (i == 0 && j == 0) { 
+                //we only look at the first stream later
+                if (!av_packet_side_data_new(&st->codecpar->coded_side_data,
+                    &st->codecpar->nb_coded_side_data,
+                    AV_PKT_DATA_IAMF_DESCRIPTORS,
+                    descriptors_size, 0)) {
+                    return AVERROR(ENOMEM);
+                }
+                avio_seek(s->pb, old_offset, SEEK_SET);
+                ret = avio_read(s->pb, st->codecpar->coded_side_data->data, descriptors_size);
+                if (ret != descriptors_size)
+                    return ret < 0 ? ret : AVERROR_INVALIDDATA;
+                avio_seek(s->pb, cur_offset, SEEK_SET);
+            }
         }
     }
 
@@ -179,6 +202,131 @@ static int iamf_read_close(AVFormatContext *s)
     ff_iamf_read_deinit(c);
 
     return 0;
+}
+
+int ff_iamf_decode_side_data(AVFormatContext *target, const AVPacketSideData *sd)
+{
+    IAMFDemuxContext dmux = { 0 };
+    FFIOContext b = { 0 };
+    AVIOContext *pbc;
+    int ret;
+    int has_stream_ids = 0;
+
+    if (!sd || sd->type != AV_PKT_DATA_IAMF_DESCRIPTORS)
+        return AVERROR(EINVAL);
+
+    ffio_init_read_context(&b, sd->data, sd->size);
+    pbc = &b.pub;
+
+    /* Parse descriptors */
+    ret = ff_iamfdec_read_descriptors(&dmux.iamf, &b.pub, sd->size, target);
+    if (ret < 0) {
+        goto fail;
+    }
+    
+    for (int k = 0; k < target->nb_streams; k++) {
+        if (target->streams[k]->id != 0) has_stream_ids = 1;
+    }
+
+    for (int i = 0; i < dmux.iamf.nb_audio_elements; i++) {
+        IAMFAudioElement *audio_element = dmux.iamf.audio_elements[i];
+        const AVIAMFAudioElement *element;
+
+        AVStreamGroup *stg =
+            avformat_stream_group_create(target, AV_STREAM_GROUP_PARAMS_IAMF_AUDIO_ELEMENT, NULL);
+        if (!stg) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
+
+        av_iamf_audio_element_free(&stg->params.iamf_audio_element);
+        stg->id = audio_element->audio_element_id;
+        /* Transfer ownership */
+        element = stg->params.iamf_audio_element = audio_element->element;
+        audio_element->element = NULL;
+
+        for (int j = 0; j < audio_element->nb_substreams; j++) {
+            IAMFSubStream *substream = &audio_element->substreams[j];
+            AVStream *stream = NULL;
+            int found = 0;
+            int sid;
+
+            /* Find the output stream by matching the substream id */
+            for (int k = 0; k < target->nb_streams; k++) {
+                AVStream *ost = target->streams[k];
+                int id = has_stream_ids ? ost->id : ost->index;
+                if (id == substream->audio_substream_id) {
+                    stream = ost;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                continue;
+            }
+
+            ret = avcodec_parameters_copy(stream->codecpar, substream->codecpar);
+            if (ret < 0)
+                goto fail;
+
+            if (!i && !j && audio_element->layers[0].substream_count == 1)
+                stream->disposition |= AV_DISPOSITION_DEFAULT;
+            else if (audio_element->nb_layers > 1 || audio_element->layers[0].substream_count > 1)
+                stream->disposition |= AV_DISPOSITION_DEPENDENT;
+            stream->id = substream->audio_substream_id;
+            avpriv_set_pts_info(stream, 64, 1, stream->codecpar->sample_rate);
+
+            ret = avformat_stream_group_add_stream(stg, stream);
+            if (ret < 0)
+                goto fail;
+        }
+    }
+
+    for (int i = 0; i < dmux.iamf.nb_mix_presentations; i++) {
+        IAMFMixPresentation *mix_presentation = dmux.iamf.mix_presentations[i];
+        const AVIAMFMixPresentation *mix = mix_presentation->cmix;
+
+        AVStreamGroup *stg =
+            avformat_stream_group_create(target, AV_STREAM_GROUP_PARAMS_IAMF_MIX_PRESENTATION, NULL);
+        if (!stg) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
+
+        av_iamf_mix_presentation_free(&stg->params.iamf_mix_presentation);
+        stg->id = mix_presentation->mix_presentation_id;
+        /* Transfer ownership */
+        stg->params.iamf_mix_presentation = mix_presentation->mix;
+        mix_presentation->mix = NULL;
+
+        for (int j = 0; j < mix->nb_submixes; j++) {
+            const AVIAMFSubmix *submix = mix->submixes[j];
+
+            for (int k = 0; k < submix->nb_elements; k++) {
+                const AVIAMFSubmixElement *submix_element = submix->elements[k];
+                const AVStreamGroup *audio_element = NULL;
+
+                for (int l = 0; l < target->nb_stream_groups; l++)
+                    if (target->stream_groups[l]->type == AV_STREAM_GROUP_PARAMS_IAMF_AUDIO_ELEMENT &&
+                        target->stream_groups[l]->id   == submix_element->audio_element_id) {
+                        audio_element = target->stream_groups[l];
+                        break;
+                    }
+                av_assert0(audio_element);
+
+                for (int l = 0; l < audio_element->nb_streams; l++) {
+                    ret = avformat_stream_group_add_stream(stg, audio_element->streams[l]);
+                    if (ret < 0 && ret != AVERROR(EEXIST))
+                        goto fail;
+                }
+            }
+        }
+    }
+
+
+fail:
+    ff_iamf_uninit_context(&dmux.iamf);
+    return ret;
 }
 
 const FFInputFormat ff_iamf_demuxer = {

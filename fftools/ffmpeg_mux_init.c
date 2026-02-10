@@ -28,6 +28,7 @@
 
 #include "libavformat/avformat.h"
 #include "libavformat/avio.h"
+#include "libavformat/iamf.h"
 
 #include "libavcodec/avcodec.h"
 
@@ -3085,6 +3086,50 @@ static int copy_meta(Muxer *mux, const OptionsContext *o)
     return 0;
 }
 
+static int copy_groups_if_empty(Muxer* mux, const OptionsContext* o)
+{
+    AVFormatContext *oc = mux->fc;
+    OutputFile *of = &mux->of;
+    int ret = 0;
+
+    /* Only proceed if user hasn't manually specified stream groups */
+    if (o->stream_groups.nb_opt > 0)
+        return 0;
+
+    for (int file_idx = 0; file_idx < nb_input_files; file_idx++) {
+        InputFile *ifile = input_files[file_idx];
+        AVFormatContext *ic = ifile->ctx;
+
+        if (ic->nb_stream_groups == 0)
+            continue;
+
+        if (ic->nb_streams == 0)
+            continue;
+
+        /* Look for IAMF descriptors in the first stream's side data */
+        const AVPacketSideData* sd =
+            av_packet_side_data_get(ic->streams[0]->codecpar->coded_side_data,
+                                    ic->streams[0]->codecpar->nb_coded_side_data,
+                                    AV_PKT_DATA_IAMF_DESCRIPTORS);
+        if (!sd)
+            continue;
+
+        av_log(mux, AV_LOG_VERBOSE,
+            "Found IAMF descriptors in input file %d, creating stream groups\n",
+            file_idx);
+
+        ret = ff_iamf_decode_side_data(oc, sd);
+        if (ret < 0) {
+            av_log(mux, AV_LOG_ERROR,
+                "Failed to parse IAMF descriptors from input file %d: %s\n",
+                file_idx, av_err2str(ret));
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
 static int set_dispositions(Muxer *mux, const OptionsContext *o)
 {
     OutputFile                    *of = &mux->of;
@@ -3444,6 +3489,11 @@ int of_open(const OptionsContext *o, const char *filename, Scheduler *sch)
 
     /* copy metadata and chapters from input files */
     err = copy_meta(mux, o);
+    if (err < 0)
+        return err;
+
+    /* copy existing groups if not informed by the user, used by IAMF. */
+    err = copy_groups_if_empty(mux, o);
     if (err < 0)
         return err;
 

@@ -30,6 +30,7 @@
 #include "libavutil/iamf.h"
 #include "libavcodec/codec_id.h"
 #include "libavcodec/codec_par.h"
+#include "libavformat/avformat.h"
 
 #define MAX_IAMF_OBU_HEADER_SIZE (1 + 8 * 3)
 
@@ -195,6 +196,8 @@ static inline IAMFParamDefinition *ff_iamf_get_param_definition(const IAMFContex
 
     return param_definition;
 }
+
+int ff_iamf_decode_side_data(AVFormatContext *c, const AVPacketSideData* sd);
 
 void ff_iamf_free_audio_element(IAMFAudioElement **paudio_element);
 void ff_iamf_free_mix_presentation(IAMFMixPresentation **pmix_presentation);
