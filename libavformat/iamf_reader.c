@@ -321,7 +321,7 @@ int ff_iamf_read_packet(AVFormatContext *s, IAMFDemuxContext *c,
         if (size < 0)
             return size;
         if (size != FFMIN(MAX_IAMF_OBU_HEADER_SIZE, max_size))
-            return AVERROR_INVALIDDATA;
+            return pb->eof_reached ? AVERROR_EOF : AVERROR_INVALIDDATA;
 
         len = ff_iamf_parse_obu_header(header, size, &obu_size, &start_pos, &type,
                                        &skip_samples, &discard_padding);
